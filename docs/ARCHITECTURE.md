@@ -52,9 +52,14 @@ silently emits `iload` where `fload` belonged.
 Class files from version 50 on are checked by HotSpot's split verifier, which
 reads the StackMapTable. Merging two reference types to `java/lang/Object` is
 sound but too imprecise for the verifier, so the converter computes real
-least-upper-bounds from the app's own classes plus a library classpath
-(`--classpath android.jar`). This is the main reason converted output loads with
-verification on.
+least-upper-bounds from the app's own classes plus a library hierarchy. The CLI
+picks that library automatically (`AndroidSdk`): the installed SDK platform the
+app was compiled against, else a bundled index of the Android API 36 hierarchy
+(`ApiIndexLoader`, built by `tools/api-index` from AOSP's Apache-2.0
+`api/current.txt` files). The index holds only flags, superclass and interfaces
+per class, which is all the oracle reads; against API 34's real `android.jar` it
+covered 4,332 of 4,342 classes with no disagreements. This is the main reason
+converted output loads with verification on.
 
 **Methods over 64 KB** (`MethodOutliner`, `MethodSplitter`).
 Dalvik has no method size limit; the JVM caps `code_length` at 65,535 bytes.

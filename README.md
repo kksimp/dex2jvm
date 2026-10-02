@@ -58,16 +58,25 @@ Requires JDK 21 or newer.
 java -jar build/dex2jvm.jar app.apk app.jar
 ```
 
-For the most precise output, give it the Android API surface the app was built
-against:
+dex2jvm needs the Android API's class hierarchy to compute precise stack-map
+frames for framework types (without it, AnkiDroid goes from 0 rejected classes
+to 169). It picks one automatically:
 
-```bash
-java -jar build/dex2jvm.jar --classpath $ANDROID_HOME/platforms/android-34/android.jar app.apk app.jar
-```
+1. **An installed Android SDK.** If `ANDROID_HOME`, `ANDROID_SDK_ROOT` or the
+   Android Studio default location has a platform installed, dex2jvm reads the
+   app's manifest and uses the `android.jar` of the API level it was compiled
+   against (or the nearest installed one).
+2. **Otherwise, a bundled index.** dex2jvm ships a 42 KB index of the Android
+   API 36 class hierarchy, generated from AOSP's public API files, so it works
+   with no SDK at all.
+
+The first line of output says which one it used. `--classpath <android.jar>`
+overrides the choice.
 
 | option | |
 |---|---|
-| `--classpath <path>` | jars/dirs the class-hierarchy oracle reads library types from (header only, nothing is loaded) |
+| `--classpath <path>` | jars/dirs the class-hierarchy oracle reads library types from (header only, nothing is loaded); overrides the automatic choice above |
+| `--no-library` | use no library hierarchy at all (less precise; for comparison) |
 | `--threads <n>` | worker threads (default `min(cores, 8)`) |
 | `--synthetic-prefix <s>` | prefix for synthetic members (default `dex2jvm`) |
 | `--redirect-unsafe <cls>` | route `sun.misc.Unsafe` calls to static methods on `<cls>` (for hosts whose Unsafe semantics differ from ART's) |

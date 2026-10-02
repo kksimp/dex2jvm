@@ -12,6 +12,7 @@ B="$ROOT/build"
 rm -rf "$B/classes" "$B/verify-classes"
 mkdir -p "$B/classes" "$B/verify-classes"
 "$JH/javac" --release 21 -nowarn -d "$B/classes" $(find "$ROOT/src/main/java" -name '*.java')
+cp -R "$ROOT/src/main/resources/." "$B/classes/"
 "$JH/jar" --create --file "$B/dex2jvm.jar" --main-class io.github.kksimp.dex2jvm.Main -C "$B/classes" .
 "$JH/javac" --release 21 -nowarn -d "$B/verify-classes" $(find "$ROOT/tools/verify/src" -name '*.java')
 "$JH/jar" --create --file "$B/dex2jvm-verify.jar" -C "$B/verify-classes" .

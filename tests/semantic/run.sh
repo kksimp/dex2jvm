@@ -69,6 +69,7 @@ rm -rf "$WORK"; mkdir -p "$WORK/ref" "$WORK/bin"
 echo "== building dex2jvm + verify tools =="
 "$JH/javac" --release 21 -nowarn -d "$WORK/bin" \
     $(find "$ROOT/src/main/java" "$ROOT/tools/verify/src" -name '*.java') || exit 2
+cp -R "$ROOT/src/main/resources/." "$WORK/bin/"
 
 CASES=("$@")
 if [ ${#CASES[@]} -eq 0 ]; then

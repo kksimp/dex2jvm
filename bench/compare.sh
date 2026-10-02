@@ -28,6 +28,7 @@ WORK="${DEX2JVM_BENCH_WORK:-$ROOT/build/bench}"
 mkdir -p "$WORK/bin"
 "$JH/javac" --release 21 -nowarn -d "$WORK/bin" \
     $(find "$ROOT/src/main/java" "$ROOT/tools/verify/src" -name '*.java') || exit 2
+cp -R "$ROOT/src/main/resources/." "$WORK/bin/"
 export PATH="$JH:$PATH"
 
 now_ms() { python3 -c 'import time; print(int(time.time()*1000))'; }

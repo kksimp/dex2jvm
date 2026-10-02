@@ -84,7 +84,11 @@ public final class Main {
         "options:",
         "  --classpath <path>        jars/dirs (separated by '" + File.pathSeparator + "') the class-hierarchy",
         "                            oracle reads library types from, e.g. an android.jar.",
-        "                            Makes stack-map frames precise for framework types.",
+        "                            Default: the installed Android SDK platform matching",
+        "                            the app's compileSdk (ANDROID_HOME, ANDROID_SDK_ROOT or",
+        "                            the Android Studio location), else the Android API",
+        "                            index bundled in dex2jvm.",
+        "  --no-library              use no library hierarchy at all (less precise frames)",
         "  --threads <n>             worker threads (default: min(cores, 8)); output is",
         "                            byte-identical at every thread count",
         "  --synthetic-prefix <s>    prefix for synthetic members (default: dex2jvm)",
@@ -98,6 +102,8 @@ public final class Main {
 
     public static void main(String[] args) {
         List<String> pos = new ArrayList<>();
+        boolean libraryGiven = false;
+        boolean noLibrary = false;
         try {
             for (int i = 0; i < args.length; i++) {
                 String a = args[i];
@@ -108,6 +114,10 @@ public final class Main {
                         return;
                     case "--classpath":
                         Options.hierarchyLoader = loaderFor(value(args, ++i, a));
+                        libraryGiven = true;
+                        break;
+                    case "--no-library":
+                        noLibrary = true;
                         break;
                     case "--threads":
                         Options.threads = Integer.parseInt(value(args, ++i, a));
@@ -138,6 +148,12 @@ public final class Main {
         Path in = Paths.get(pos.get(0));
         Path out = Paths.get(pos.get(1));
         long t0 = System.currentTimeMillis();
+        if (noLibrary) {
+            Options.hierarchyLoader = ClassLoader.getPlatformClassLoader();
+            System.err.println("[dex2jvm] library: none (--no-library); framework types merge to java/lang/Object");
+        } else if (!libraryGiven) {
+            chooseLibrary(in);
+        }
 
         // ---- phase 1: PARSE. Container layout + every DEX's header and class
         // table (DexConverter.open parses each image eagerly). Anything that
@@ -191,6 +207,32 @@ public final class Main {
             try { Files.deleteIfExists(out); } catch (IOException ignored) {}
             System.exit(EXIT_CONVERT_FAILED);
         }
+    }
+
+    /**
+     * Picks the class-hierarchy library when --classpath was not given: the
+     * installed SDK platform the app was built against (exact, from Google's
+     * android.jar), else the index bundled in this jar (AOSP's public API
+     * hierarchy; see ApiIndexLoader). Either one makes framework-type merges
+     * precise; without one, stack-map frames widen framework types to
+     * java/lang/Object, which HotSpot's verifier can reject.
+     */
+    private static void chooseLibrary(Path in) {
+        AndroidSdk.Choice sdk = AndroidSdk.choose(in);
+        if (sdk != null) {
+            Options.hierarchyLoader = loaderFor(sdk.jar.toString());
+            System.err.println("[dex2jvm] library: " + sdk.jar + " (" + sdk.reason + ")");
+            return;
+        }
+        ApiIndexLoader idx = ApiIndexLoader.bundled();
+        if (idx != null) {
+            Options.hierarchyLoader = idx;
+            System.err.println("[dex2jvm] library: " + idx.description + " (" + idx.size()
+                    + " classes; no Android SDK found)");
+            return;
+        }
+        System.err.println("[dex2jvm] library: none found; pass --classpath <android.jar>"
+                + " for more precise output");
     }
 
     private static String value(String[] args, int i, String flag) {
