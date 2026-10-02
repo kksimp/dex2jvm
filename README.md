@@ -7,10 +7,21 @@ standard Java class files that load and run on a stock HotSpot JVM **with
 bytecode verification on**. It was built for [Mac.apk](https://github.com/kksimp/Mac.apk-Releases),
 which runs Android apps on macOS, and is released here as a standalone tool.
 
-Tools like dex2jar and enjarify are mostly used to get a jar you can open in a
-decompiler. dex2jvm has to produce a jar the JVM will execute, so it targets the
-strict class-file rules (version 52, full StackMapTable frames) and preserves
-the metadata real apps depend on at run time.
+## Why does this exist?
+
+Android apps contain DEX bytecode, designed for Android's own runtime (ART,
+formerly Dalvik). If you want to run Android app code inside a regular JVM,
+converting DEX into something the JVM will actually verify and execute is much
+harder than producing a jar that a decompiler can open.
+
+```
+classes.dex  -->  dex2jvm  -->  JVM class files  -->  HotSpot (verification on)
+```
+
+Tools like dex2jar and enjarify are mostly used for the decompiler case.
+dex2jvm is built for the execution case: it targets the strict class-file rules
+(version 52, full StackMapTable frames) and preserves the metadata real apps
+depend on at run time.
 
 ## What it does that the older tools don't
 
