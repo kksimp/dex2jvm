@@ -1,19 +1,29 @@
-// Options -- process-wide converter settings that change what is EMITTED.
+// Options -- process-wide converter settings.
 //
 // Every field is read during conversion, so set them BEFORE DexConverter.open()
 // and do not change them while a session is converting. The CLI (Main) sets
 // them from its flags; an embedding application sets them directly.
 //
-// Each field can also be seeded from a system property or an environment
-// variable, so a build that wraps the converter can configure it without code:
+// Each field is seeded, highest precedence first, from a system property, an
+// environment variable, an optional HostDefaults class, then the built-in
+// default:
 //
-//   field              system property              environment variable
-//   syntheticPrefix    dex2jvm.syntheticPrefix      DEX2JVM_SYNTHETIC_PREFIX
-//   unsafeRedirect     dex2jvm.redirectUnsafe       DEX2JVM_REDIRECT_UNSAFE
-//   exitRedirect       dex2jvm.redirectExit         DEX2JVM_REDIRECT_EXIT
-//   threads            dex2jvm.threads              DEX2JVM_THREADS
+//   field            system property            environment variable        HostDefaults field
+//   syntheticPrefix  dex2jvm.syntheticPrefix    DEX2JVM_SYNTHETIC_PREFIX    SYNTHETIC_PREFIX
+//   unsafeRedirect   dex2jvm.redirectUnsafe     DEX2JVM_REDIRECT_UNSAFE     REDIRECT_UNSAFE
+//   exitRedirect     dex2jvm.redirectExit       DEX2JVM_REDIRECT_EXIT       REDIRECT_EXIT
+//   threads          dex2jvm.threads            DEX2JVM_THREADS             THREADS
+//   logTag           dex2jvm.logTag             DEX2JVM_LOG_TAG             LOG_TAG
+//   parsedMarker     dex2jvm.parsedMarker       DEX2JVM_PARSED_MARKER       PARSED_MARKER
+//   library          dex2jvm.library            DEX2JVM_LIBRARY             LIBRARY
 //
-// The system property wins over the environment variable.
+// HOSTDEFAULTS. A product that vendors this source tree can add a class named
+// HostDefaults to THIS package, holding public static final String fields named
+// as in the last column. Its values become that build's defaults, so the
+// vendored copy can be synced from upstream verbatim and still behave the way
+// the product needs: the product's own settings live in one file the sync
+// never touches. A build without the class (this repository) uses the built-in
+// defaults.
 
 package io.github.kksimp.dex2jvm;
 
@@ -27,7 +37,7 @@ public final class Options {
      * something an app's own code will not already use.
      */
     public static volatile String syntheticPrefix = setting("dex2jvm.syntheticPrefix",
-            "DEX2JVM_SYNTHETIC_PREFIX", "dex2jvm");
+            "DEX2JVM_SYNTHETIC_PREFIX", "SYNTHETIC_PREFIX", "dex2jvm");
 
     /**
      * When non-null, the internal name of a class that receives every routed
@@ -40,7 +50,7 @@ public final class Options {
      * conversion has no reason to set it.
      */
     public static volatile String unsafeRedirect = setting("dex2jvm.redirectUnsafe",
-            "DEX2JVM_REDIRECT_UNSAFE", null);
+            "DEX2JVM_REDIRECT_UNSAFE", "REDIRECT_UNSAFE", null);
 
     /**
      * When non-null, the internal name of a class that receives
@@ -51,30 +61,65 @@ public final class Options {
      * <p>For hosts where "the app exits" must not mean "the JVM exits".
      */
     public static volatile String exitRedirect = setting("dex2jvm.redirectExit",
-            "DEX2JVM_REDIRECT_EXIT", null);
+            "DEX2JVM_REDIRECT_EXIT", "REDIRECT_EXIT", null);
 
     /**
      * Worker threads for a bulk conversion; 0 means min(cores, 8). Output is
      * byte-identical at every thread count.
      */
-    public static volatile int threads = parseThreads(setting("dex2jvm.threads",
-            "DEX2JVM_THREADS", null));
+    public static volatile int threads = parseInt(setting("dex2jvm.threads",
+            "DEX2JVM_THREADS", "THREADS", null));
+
+    /** The tag on every stderr line the converter prints, as "[tag] ...". */
+    public static volatile String logTag = setting("dex2jvm.logTag",
+            "DEX2JVM_LOG_TAG", "LOG_TAG", "dex2jvm");
+
+    /**
+     * When true, the CLI creates {@code <out.jar>.parsed} as soon as the input
+     * has been fully PARSED, and removes it when it exits. A caller running the
+     * conversion in the background can poll for it to learn the input is valid
+     * (so a parse failure is ruled out) before the conversion itself finishes.
+     */
+    public static volatile boolean parsedMarker = Boolean.parseBoolean(setting(
+            "dex2jvm.parsedMarker", "DEX2JVM_PARSED_MARKER", "PARSED_MARKER", "false"));
+
+    /**
+     * How the CLI picks the class-hierarchy library when --classpath is not
+     * given: "auto" (the installed Android SDK platform matching the app, else
+     * the bundled API index), "classloader" (only what the converter's own
+     * class loader can see, for embedders that put their framework on it), or
+     * "none".
+     */
+    public static volatile String library = setting("dex2jvm.library",
+            "DEX2JVM_LIBRARY", "LIBRARY", "auto");
 
     /**
      * Where the class-hierarchy oracle reads framework and library classes
      * from (header only, nothing is loaded). Null means the converter's own
-     * class loader. Point it at an android.jar so merges of framework types
-     * produce precise stack-map frames instead of java/lang/Object.
+     * class loader. The CLI fills it in according to {@link #library}.
      */
     public static volatile ClassLoader hierarchyLoader = null;
 
-    private static String setting(String property, String env, String dflt) {
+    private static String setting(String property, String env, String hostField, String dflt) {
         String v = System.getProperty(property);
         if (v == null || v.isEmpty()) v = System.getenv(env);
+        if (v == null || v.isEmpty()) v = hostDefault(hostField);
         return (v == null || v.isEmpty()) ? dflt : v;
     }
 
-    private static int parseThreads(String v) {
+    /** A String field of this package's optional HostDefaults class, or null. */
+    private static String hostDefault(String field) {
+        try {
+            Class<?> c = Class.forName(Options.class.getPackageName() + ".HostDefaults",
+                    true, Options.class.getClassLoader());
+            Object v = c.getField(field).get(null);
+            return v instanceof String ? (String) v : null;
+        } catch (ReflectiveOperationException | LinkageError e) {
+            return null;
+        }
+    }
+
+    private static int parseInt(String v) {
         if (v == null) return 0;
         try {
             return Math.max(0, Integer.parseInt(v.trim()));

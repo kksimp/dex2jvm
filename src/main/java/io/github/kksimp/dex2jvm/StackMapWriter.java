@@ -45,8 +45,8 @@ import java.util.List;
  *   becomes verifier-clean. Path (a) is the one that matters because (b)
  *   depends on turning the verifier off: that is VM-wide (it also stops
  *   verifying every other class in the VM, which hides bugs there too, not
- *   just in the converted code), and the -Xverify:none launcher option that
- *   does it was deprecated in JDK 13 and is on a removal path.
+ *   just in the converted code), and the launcher option that does it was
+ *   deprecated in JDK 13 and is on a removal path.
  *
  * FRAME SHAPE CONTRACT (what a type-inference producer must hand us):
  *

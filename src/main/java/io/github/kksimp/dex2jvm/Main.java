@@ -89,6 +89,9 @@ public final class Main {
         "                            the Android Studio location), else the Android API",
         "                            index bundled in dex2jvm.",
         "  --no-library              use no library hierarchy at all (less precise frames)",
+        "  --parsed-marker           create <out.jar>.parsed once the input is parsed",
+        "                            (removed on exit), for callers that run the",
+        "                            conversion in the background",
         "  --threads <n>             worker threads (default: min(cores, 8)); output is",
         "                            byte-identical at every thread count",
         "  --synthetic-prefix <s>    prefix for synthetic members (default: dex2jvm)",
@@ -119,6 +122,9 @@ public final class Main {
                     case "--no-library":
                         noLibrary = true;
                         break;
+                    case "--parsed-marker":
+                        Options.parsedMarker = true;
+                        break;
                     case "--threads":
                         Options.threads = Integer.parseInt(value(args, ++i, a));
                         break;
@@ -148,10 +154,10 @@ public final class Main {
         Path in = Paths.get(pos.get(0));
         Path out = Paths.get(pos.get(1));
         long t0 = System.currentTimeMillis();
-        if (noLibrary) {
+        if (noLibrary || "none".equals(Options.library)) {
             Options.hierarchyLoader = ClassLoader.getPlatformClassLoader();
-            System.err.println("[dex2jvm] library: none (--no-library); framework types merge to java/lang/Object");
-        } else if (!libraryGiven) {
+            System.err.println("[" + Options.logTag + "] library: none (--no-library); framework types merge to java/lang/Object");
+        } else if (!libraryGiven && !"classloader".equals(Options.library)) {
             chooseLibrary(in);
         }
 
@@ -163,21 +169,21 @@ public final class Main {
             List<byte[]> dexes = readDexesChecked(in);
             session = DexConverter.open(dexes.toArray(new byte[0][]));
         } catch (NoDexException e) {
-            System.err.println("[dex2jvm] NO CODE: " + e.getMessage());
+            System.err.println("[" + Options.logTag + "] NO CODE: " + e.getMessage());
             try { Files.deleteIfExists(out); } catch (IOException ignored) {}
             System.exit(EXIT_NO_DEX);
             return;
         } catch (OutOfMemoryError oom) {
             // Running out of heap while READING says nothing about whether the
             // dex is valid, so it is a converter-side failure, not bad input.
-            System.err.println("[dex2jvm] CONVERT FAILED (out of memory"
+            System.err.println("[" + Options.logTag + "] CONVERT FAILED (out of memory"
                     + " while reading the dex set; the input is not known to"
                     + " be bad; try a larger -Xmx): " + oom);
             try { Files.deleteIfExists(out); } catch (IOException ignored) {}
             System.exit(EXIT_CONVERT_FAILED);
             return;
         } catch (Throwable t) {
-            System.err.println("[dex2jvm] INVALID INPUT (the container/DEX"
+            System.err.println("[" + Options.logTag + "] INVALID INPUT (the container/DEX"
                     + " cannot be parsed): " + t);
             t.printStackTrace();
             try { Files.deleteIfExists(out); } catch (IOException ignored) {}
@@ -185,26 +191,38 @@ public final class Main {
             return;
         }
 
+        // The parse verdict is now known. A caller polling for the marker can
+        // stop treating the input as possibly invalid while the conversion
+        // itself is still running. Advisory: without it the caller just waits
+        // for the exit code. Removed on every exit path below; a SIGKILL leaves
+        // it behind for the caller to clean up.
+        Path parsedMarker = Paths.get(out + ".parsed");
+        if (Options.parsedMarker) {
+            try { Files.createFile(parsedMarker); } catch (IOException ignored) {}
+        }
+
         // ---- phase 2: CONVERT + write the jar. The input is proven readable
         // by now, so an escape here is the converter's, and gets its own code.
         try {
             int n = convert(session, out);
-            System.err.printf("[dex2jvm] %d classes -> %s in %d ms%n",
+            System.err.printf("[" + Options.logTag + "] %d classes -> %s in %d ms%n",
                     n, out, System.currentTimeMillis() - t0);
+            try { Files.deleteIfExists(parsedMarker); } catch (IOException ignored) {}
             if (n > 0) System.exit(0);
             // Parsed, but produced nothing: every class failed to translate
             // (or the dex declares zero classes).
-            System.err.println("[dex2jvm] FAILED: the dex set parsed but 0"
+            System.err.println("[" + Options.logTag + "] FAILED: the dex set parsed but 0"
                     + " classes could be converted (see the per-class errors"
                     + " above); no usable jar");
             try { Files.deleteIfExists(out); } catch (IOException ignored) {}
             System.exit(1);
         } catch (Throwable t) {
-            System.err.println("[dex2jvm] CONVERT FAILED (the container"
+            System.err.println("[" + Options.logTag + "] CONVERT FAILED (the container"
                     + " parsed completely; this failure is the converter's,"
                     + " not the input's): " + t);
             t.printStackTrace();
             try { Files.deleteIfExists(out); } catch (IOException ignored) {}
+            try { Files.deleteIfExists(parsedMarker); } catch (IOException ignored) {}
             System.exit(EXIT_CONVERT_FAILED);
         }
     }
@@ -221,17 +239,17 @@ public final class Main {
         AndroidSdk.Choice sdk = AndroidSdk.choose(in);
         if (sdk != null) {
             Options.hierarchyLoader = loaderFor(sdk.jar.toString());
-            System.err.println("[dex2jvm] library: " + sdk.jar + " (" + sdk.reason + ")");
+            System.err.println("[" + Options.logTag + "] library: " + sdk.jar + " (" + sdk.reason + ")");
             return;
         }
         ApiIndexLoader idx = ApiIndexLoader.bundled();
         if (idx != null) {
             Options.hierarchyLoader = idx;
-            System.err.println("[dex2jvm] library: " + idx.description + " (" + idx.size()
+            System.err.println("[" + Options.logTag + "] library: " + idx.description + " (" + idx.size()
                     + " classes; no Android SDK found)");
             return;
         }
-        System.err.println("[dex2jvm] library: none found; pass --classpath <android.jar>"
+        System.err.println("[" + Options.logTag + "] library: none found; pass --classpath <android.jar>"
                 + " for more precise output");
     }
 
@@ -368,14 +386,14 @@ public final class Main {
         Map<String, String> errors = session.errors();
         if (errorsOut != null) errorsOut.putAll(errors);
         if (!errors.isEmpty()) {
-            System.err.printf("[dex2jvm] %d classes failed to translate:%n", errors.size());
+            System.err.printf("[" + Options.logTag + "] %d classes failed to translate:%n", errors.size());
             int shown = 0;
             for (Map.Entry<String, String> e : errors.entrySet()) {
                 if (shown++ == 20) {
-                    System.err.printf("[dex2jvm]   ... and %d more%n", errors.size() - 20);
+                    System.err.printf("[" + Options.logTag + "]   ... and %d more%n", errors.size() - 20);
                     break;
                 }
-                System.err.println("[dex2jvm]   " + e.getKey() + ": " + e.getValue());
+                System.err.println("[" + Options.logTag + "]   " + e.getKey() + ": " + e.getValue());
             }
         }
         return count[0];
@@ -761,7 +779,7 @@ public final class Main {
                     .thenComparing(ZipEntry::getName));
             StringBuilder names = new StringBuilder();
             for (ZipEntry e : strays) names.append(' ').append(e.getName());
-            System.err.println("[dex2jvm] note:" + names
+            System.err.println("[" + Options.logTag + "] note:" + names
                     + " are outside the classes.dex/classes2.dex/... run ART opens;"
                     + " converting them last so they cannot shadow a real class");
             ordered.addAll(strays);

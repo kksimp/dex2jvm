@@ -234,7 +234,7 @@ public final class DexConverter {
             }
             java.util.concurrent.ExecutorService pool =
                 java.util.concurrent.Executors.newFixedThreadPool(threads, r -> {
-                    Thread t = new Thread(r, "dex2jvm");
+                    Thread t = new Thread(r, Options.logTag);
                     t.setDaemon(true);   // never hold the JVM open on an early exit
                     return t;
                 });
@@ -438,7 +438,7 @@ public final class DexConverter {
                         + " (JVMS 4.9.1); neither MethodOutliner nor"
                         + " MethodSplitter could rescue it");
                     oversizeStubs.incrementAndGet();
-                    System.err.println("[dex2jvm] STUBBED oversize method "
+                    System.err.println("[" + Options.logTag + "] STUBBED oversize method "
                         + cls.name() + "." + m.name() + m.descriptor()
                         + " (code_length " + over + ") -- the CLASS is kept,"
                         + " this one method throws if called");
