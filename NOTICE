@@ -1,0 +1,14 @@
+dex2jvm
+Copyright 2026 kksimp
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+dex2jvm was developed as part of Mac.apk, which runs Android apps on macOS.
+
+Portions of the design are derived from enjarify
+(https://github.com/google/enjarify), Copyright 2015 Google Inc.,
+licensed under the Apache License, Version 2.0. In particular the
+register type-inference model, the one-Dalvik-register-to-many-JVM-locals
+mapping, the split constant pool and the output jar layout follow
+enjarify's approach. dex2jvm is an independent Java implementation; no
+enjarify source files are included.
