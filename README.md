@@ -33,8 +33,9 @@ depend on at run time.
 - **Methods over the JVM's 64 KB limit.** Dalvik has no method size limit; the
   JVM caps a method at 65,535 bytes. dex2jvm hoists straight-line regions into
   helper methods, or splits a method with complex control flow into a chain of
-  methods. A method it cannot rescue becomes a stub that throws, and the rest of
-  the class is kept.
+  methods. An oversize static initializer that only builds data is run at
+  conversion time and replaced by the state it computes. A method it cannot
+  rescue becomes a stub that throws, and the rest of the class is kept.
 - **R8-minified input.** Shipping apps are built by R8, which emits shapes a JVM
   rejects: constructor calls re-pointed at a superclass, `invoke-super` on an
   indirect interface, private access between classes whose nest metadata was
