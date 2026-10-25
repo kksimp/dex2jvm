@@ -68,9 +68,15 @@ splitter cuts a method with dense control flow into a forward-only chain of
 methods entered through a dispatch switch, with live values carried across each
 cut. It never cuts inside a try range or between a method's first and last
 monitor operation, so a method that is one big try block or one big lock
-cannot be split. Both refuse (loudly) rather than emit code they
-cannot prove correct; a method neither can rescue becomes a stub that throws,
-and the rest of its class is kept.
+cannot be split. A part receives the values live at its entry as arguments,
+and a descriptor holds at most 255 argument slots (JVMS 4.3.3); when a cut's
+live set is wider, a `<clinit>` hands them over through private static fields,
+and a constructor through private transient fields of the object it is
+constructing, which every part then takes as its first argument
+(`DEX2JVM_CTOR_RESCUE=0` turns the constructor case off). The outliner and the
+splitter both refuse (loudly) rather than emit code they cannot prove correct;
+a method neither can rescue becomes a stub that throws, and the rest of its
+class is kept.
 
 **R8-shaped input** (`InitRepointPlan`, `SuperInterfacePlan`, `NestPlan`).
 Shipping apps are minified by R8, which produces bytecode a JVM rejects:

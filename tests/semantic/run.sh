@@ -35,6 +35,12 @@
 # The only legitimate reason is that its OUTPUT depends on names or metadata the
 # mode destroys (R8 renames classes and strips Signature/InnerClasses).
 #
+# `// dexsem: no-split-force` opts a case out of a run under
+# DEX2JVM_SPLIT_FORCE. Only for a case that reaches the REAL 64 KB threshold
+# with a shape the lowered budget cannot hold (CtorSpill: one spilled part's
+# entry stub alone is larger than the forced limit, and the forced path has no
+# stub fallback, so the class fails to translate by design).
+#
 # Cases must print DETERMINISTIC output: no identity hash codes, no HashMap
 # iteration order, no timing. Under r8 also avoid printing class names.
 #
@@ -148,6 +154,9 @@ for c in "${CASES[@]}"; do
     row=$(printf "%-10s" "$c"); msg=""
     for m in $RUN_MODES; do
         if mode_skips "$c" "$m"; then row="$row$(printf '%-11s' "n/a")"; continue; fi
+        if [ -n "${DEX2JVM_SPLIT_FORCE:-}" ] && mode_skips "$c" split-force; then
+            row="$row$(printf '%-11s' "n/a")"; continue
+        fi
         v=$(judge "$c" "$m")
         row="$row$(printf '%-11s' "$v")"
         [ -z "$msg" ] && msg="$note"
