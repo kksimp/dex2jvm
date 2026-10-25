@@ -207,6 +207,13 @@ public final class Main {
             int n = convert(session, out);
             System.err.printf("[" + Options.logTag + "] %d classes -> %s in %d ms%n",
                     n, out, System.currentTimeMillis() - t0);
+            int uc = DexConverter.foreignWriteClasses.get();
+            if (uc > 0) {
+                System.err.printf("[" + Options.logTag + "] ACC_FINAL cleared on %d fields"
+                        + " in %d classes: written outside their initializer, which the JVM"
+                        + " refuses from class version 53 (DEX2JVM_UNFINAL_DEBUG=1 lists them)%n",
+                        DexConverter.foreignWriteFields.get(), uc);
+            }
             try { Files.deleteIfExists(parsedMarker); } catch (IOException ignored) {}
             if (n > 0) System.exit(0);
             // Parsed, but produced nothing: every class failed to translate

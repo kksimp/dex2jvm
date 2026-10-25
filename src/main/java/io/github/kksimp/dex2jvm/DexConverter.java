@@ -429,6 +429,7 @@ public final class DexConverter {
             cls.name(),
             cls.superclassName() == null ? null : cls.superclassName(),
             cls.interfaceNames().toArray(new String[0]));
+        cw.setUnfinalForeignWrites(UNFINAL_FOREIGN_WRITES);
 
         String src = cls.sourceFile();
         if (src != null) cw.setSourceFile(src);
@@ -511,8 +512,27 @@ public final class DexConverter {
             }
         }
 
-        return cw.toByteArray();
+        // toByteArray also clears ACC_FINAL on own fields written outside
+        // their initializer (UNFINAL_FOREIGN_WRITES).
+        byte[] bytes = cw.toByteArray();
+        List<String> unfinaled = cw.foreignWriteUnfinals();
+        if (!unfinaled.isEmpty()) {
+            foreignWriteClasses.incrementAndGet();
+            foreignWriteFields.addAndGet(unfinaled.size());
+            if (UNFINAL_DEBUG) {
+                System.err.println("[" + Options.logTag + "] unfinal " + cls.name() + ": "
+                    + String.join(" ", unfinaled) + " (written outside its initializer)");
+            }
+        }
+        return bytes;
     }
+
+    /** Classes, and fields, that UNFINAL_FOREIGN_WRITES changed, for the
+     *  convert report. Counted per successful conversion of a class. */
+    static final java.util.concurrent.atomic.AtomicInteger foreignWriteClasses =
+        new java.util.concurrent.atomic.AtomicInteger();
+    static final java.util.concurrent.atomic.AtomicInteger foreignWriteFields =
+        new java.util.concurrent.atomic.AtomicInteger();
 
     // ==================================================================
     // Annotations -> attributes
@@ -1023,6 +1043,33 @@ public final class DexConverter {
      */
     static final boolean INITIALIZER_HELPER_FINALS =
             !"0".equals(System.getenv("DEX2JVM_INITIALIZER_HELPER_FINALS"));
+
+    /**
+     * DEX2JVM_UNFINAL_FOREIGN_WRITES (default ON; =0 keeps ACC_FINAL, byte for
+     * byte the old output).
+     *
+     * The general form of the rule above, for writes that are already in the
+     * DEX: in a class emitted at major_version 53 or above, clear ACC_FINAL on
+     * each own static field a method other than &lt;clinit&gt; writes, and on each
+     * own instance field a method other than &lt;init&gt; writes, as read from the
+     * emitted bytecode. ART lets any method of the class write its own finals,
+     * and obfuscated SDKs do (a static {@code init$0} filling a private static
+     * final table for &lt;clinit&gt;); HotSpot refuses it from version 53 on, so
+     * the class never initializes. Measured 2026-10-25 on com.leumi.leumiwallet
+     * 155.3.1, where o.ey.b.$$a killed the Firebase-Messaging thread: 399
+     * classes, 1,096 static fields, every other class byte-identical; none in
+     * WhatsApp. Helpers marked as initializer parts stay under
+     * DEX2JVM_INITIALIZER_HELPER_FINALS. See
+     * ClassFileWriter.unfinalFieldsWrittenOutsideInitializers.
+     *
+     * DEX2JVM_UNFINAL_DEBUG=1 prints one line per class it changes; the counts
+     * are always kept (foreignWriteClasses / foreignWriteFields) and the CLI
+     * reports them.
+     */
+    static final boolean UNFINAL_FOREIGN_WRITES =
+            !"0".equals(System.getenv("DEX2JVM_UNFINAL_FOREIGN_WRITES"));
+    static final boolean UNFINAL_DEBUG =
+            System.getenv("DEX2JVM_UNFINAL_DEBUG") != null;
 
     static int fieldAccessFlags(DexClass cls, DexField f, SuperInterfacePlan app) {
         int flags = f.accessFlags() & FIELD_FLAGS_MASK;

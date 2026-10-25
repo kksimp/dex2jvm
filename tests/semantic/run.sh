@@ -35,6 +35,13 @@
 # The only legitimate reason is that its OUTPUT depends on names or metadata the
 # mode destroys (R8 renames classes and strips Signature/InnerClasses).
 #
+# A case may also need DEX that javac cannot produce. A line
+# `// dexsem: dex-final Outer$Inner.field ...` sets ACC_FINAL on those fields in
+# every mode's classes.dex before conversion (tools/DexSetFinal.java), so a
+# field the source declares non-final becomes a final one that methods other
+# than its initializer write, as obfuscated apps ship it. The names must
+# survive the mode, so such a case opts out of r8.
+#
 # Cases must print DETERMINISTIC output: no identity hash codes, no HashMap
 # iteration order, no timing. Under r8 also avoid printing class names.
 #
@@ -68,7 +75,7 @@ rm -rf "$WORK"; mkdir -p "$WORK/ref" "$WORK/bin"
 
 echo "== building dex2jvm + verify tools =="
 "$JH/javac" --release 21 -nowarn -d "$WORK/bin" \
-    $(find "$ROOT/src/main/java" "$ROOT/tools/verify/src" -name '*.java') || exit 2
+    $(find "$ROOT/src/main/java" "$ROOT/tools/verify/src" "$ROOT/tests/semantic/tools" -name '*.java') || exit 2
 cp -R "$ROOT/src/main/resources/." "$WORK/bin/"
 
 CASES=("$@")
@@ -110,6 +117,14 @@ for mode in $MODES; do
       *) echo "unknown mode $mode"; exit 2 ;;
     esac
     [ -f "$WORK/dex_$mode/classes.dex" ] || { echo "no dex produced for $mode"; exit 2; }
+    for c in "${CASES[@]}"; do
+        mode_skips "$c" "$mode" && continue
+        marks=$(sed -n 's/^\/\/ dexsem: dex-final //p' "$SRC/$c.java" | tr '\n' ' ')
+        [ -n "${marks// /}" ] || continue
+        # shellcheck disable=SC2086  # one argument per field
+        out=$("$JH/java" -cp "$WORK/bin" DexSetFinal "$WORK/dex_$mode/classes.dex" $marks 2>&1) \
+            || { echo "$out" | sed "s/^/   [$mode] /"; echo "DexSetFinal failed for $c"; exit 2; }
+    done
     "$JH/java" -Xmx2g -cp "$WORK/bin" io.github.kksimp.dex2jvm.Main \
         "$WORK/dex_$mode/classes.dex" "$WORK/$mode.jar" 2>&1 | sed "s/^/   [$mode] /"
     [ -s "$WORK/$mode.jar" ] || { echo "converter produced no jar for $mode"; exit 2; }

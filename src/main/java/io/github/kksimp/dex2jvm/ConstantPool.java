@@ -563,6 +563,34 @@ public final class ConstantPool {
 
     public int tagAt(int index) { return tags[index] & 0xFF; }
 
+    /**
+     * The member a CONSTANT_Fieldref names, as {@link #memberKey} would spell
+     * it, or null when {@code index} is not a Fieldref. Read only: it never
+     * allocates an entry, so asking cannot change the class file.
+     */
+    String fieldRefKey(int index) {
+        if (index <= 0 || index >= tags.length || (tags[index] & 0xFF) != CONSTANT_Fieldref) {
+            return null;
+        }
+        int nat = y[index];
+        return utf8Key(x[x[index]]) + '\0' + utf8Key(x[nat]) + '\0' + utf8Key(y[nat]);
+    }
+
+    /**
+     * owner, name and descriptor joined by NUL, each as its modified-UTF-8
+     * bytes read as ISO-8859-1. That is a lossless view of the exact bytes
+     * (the JVM compares names byte for byte), and NUL never occurs inside
+     * modified UTF-8 (JVMS 4.4.7), so the key is unambiguous.
+     */
+    static String memberKey(String owner, String name, String descriptor) {
+        return latin1(toModifiedUtf8(owner)) + '\0' + latin1(toModifiedUtf8(name))
+                + '\0' + latin1(toModifiedUtf8(descriptor));
+    }
+
+    private String utf8Key(int utf8Index) { return latin1(utf8Table[x[utf8Index]]); }
+
+    private static String latin1(byte[] b) { return new String(b, StandardCharsets.ISO_8859_1); }
+
     // ---- serialization ---------------------------------------------------
 
     private void writeEntry(ByteVector out, int index) {

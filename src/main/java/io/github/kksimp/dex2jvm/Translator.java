@@ -2115,11 +2115,17 @@ public final class Translator {
                                         | ClassFileWriter.ACC_SYNTHETIC, f[0], f[1]);
                 }
             }
+            // A part of an initializer is marked as one, so the foreign-write
+            // rule leaves its writes to initializerHelperPuts above. See
+            // ClassFileWriter.unfinalFieldsWrittenOutsideInitializers.
+            String initializer = ("<clinit>".equals(method.name()) || "<init>".equals(method.name()))
+                    ? method.name() : null;
             for (Object[] s : pendingSynthetics) {
                 mw.owner.addMethod(ClassFileWriter.ACC_PRIVATE | ClassFileWriter.ACC_STATIC
                                      | ClassFileWriter.ACC_SYNTHETIC,
                                      (String) s[0], (String) s[1])
-                          .setCode((CodeWriter) s[2]);
+                          .setCode((CodeWriter) s[2])
+                          .markInitializerHelper(initializer);
             }
         }
 

@@ -78,6 +78,15 @@ constructor calls re-pointed at a superclass constructor, `invoke-super` naming
 an indirect interface, private access between classes whose nest attributes
 were stripped. Each plan rewrites one such shape into its JVM-legal equivalent.
 
+**Finals written outside their initializer** (`ClassFileWriter`).
+ART lets any method of a class write that class's own final fields, and
+obfuscators use it: a static helper that `<clinit>` calls fills a
+`private static final` table. From class-file version 53 (a nest raises a class
+to 55), HotSpot allows a write to a static final only in `<clinit>` and to an
+instance final only in `<init>`. The converter reads each method's emitted
+`putstatic` / `putfield` and clears `ACC_FINAL` on exactly the fields written
+anywhere else. Every other class is unchanged.
+
 **Synchronized code the JIT can compile** (`MonitorCover`).
 HotSpot only JIT-compiles a method with `monitorenter` if it can prove the
 monitors balanced. Translated exception tables can defeat that proof, leaving
