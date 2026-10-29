@@ -302,6 +302,67 @@ final class MethodSplitter {
     // plan only a part OVER the ceiling is spilled, and every part that fits
     // keeps its parameters.
 
+    /**
+     * DEX2JVM_CTOR_RESCUE (default ON; =0 restores the argument-slot refusal
+     * for constructors, byte for byte, and the method is stubbed as before).
+     *
+     * A part of a split &lt;init&gt; whose live set does not fit JVMS 4.3.3's
+     * 255 argument slots receives its values through private transient
+     * synthetic INSTANCE fields of the object under construction. See "THE
+     * &lt;init&gt; SPILL" below.
+     */
+    static final boolean CTOR_SPILL =
+            !"0".equals(System.getenv("DEX2JVM_CTOR_RESCUE"));
+
+    // THE <init> SPILL
+    //
+    // The same wall stands in front of constructors. R8 keeps a value it uses
+    // more than once in ONE register for the whole method, so a long generated
+    // constructor that fills several collections from a shared pool of boxed
+    // keys and values has hundreds of registers live at every point. Measured
+    // on WhatsApp 2.26.42.71's X/08W.<init>()V (391 registers, 27,940 code
+    // units, 71,858 bytes of bytecode, no branch, no try, no monitor): super()
+    // first, then five ImmutableMap builders filled with ~2,600 put() calls
+    // whose Integer/Boolean/String operands sit in registers. Every plan needed
+    // 259..341 argument slots, the stub replaced the constructor, and the app
+    // died in Application.onCreate on `new X/08W()`.
+    //
+    // Static fields would be wrong here -- constructors run concurrently on
+    // many threads and nest -- but the object under construction is a carrier
+    // that has none of those problems:
+    //   - a constructor runs exactly once per object, and a cut can only sit
+    //     after super() (rule 6), so the object is initialized wherever a part
+    //     is entered and nothing else ever constructs it again;
+    //   - two threads, or a nested `new` of the same class inside the
+    //     constructor, construct DIFFERENT objects, so their fields never mix;
+    //   - a portal writes the fields of the one part it calls immediately
+    //     before the call, and that part's entry stub reads them first thing,
+    //     so no code -- not even app code reached through the receiver --
+    //     runs between the write and the read;
+    //   - a field is typed with exactly the parameter's descriptor, so
+    //     putfield/getfield move the value with NO cast (the header's no-cast
+    //     rule holds, for the same reason it does for the <clinit> spill), and
+    //     a reference field is nulled by the entry that reads it, so the object
+    //     does not keep alive what the original method let die.
+    // The fields are private, TRANSIENT and synthetic: Java serialization and
+    // the default serialVersionUID both ignore private transient fields, and
+    // so do the reflection-based mappers that skip transient fields.
+    //
+    // To reach those fields every part of such a chain takes the object under
+    // construction as an extra FIRST argument (slot 0, `receiver`), ahead of
+    // the entry id. Part 0 is the constructor itself, whose JVM local 0 is
+    // `this` and is never written by the body (register slots start above the
+    // arguments), so a portal anywhere after super() can always push it; a
+    // part receives it in slot 0 and keeps it there, because its register
+    // slots start at the ORIGINAL method's argument count, which is at least
+    // one for a constructor. Parts that fit keep their parameters, now after
+    // the receiver and the id.
+    //
+    // Like the <clinit> spill this is a last resort: it runs only after the
+    // parameter-only ladder failed with this ceiling among its refusals, so a
+    // constructor any earlier plan placed is translated byte for byte as
+    // before.
+
     /** The LAST valid cut whose distance from `startBytes` is within `bound`,
      *  or -1. Factored out so the widened second attempt cannot drift from the
      *  first: both passes must apply identical validity rules and differ only
@@ -503,8 +564,15 @@ final class MethodSplitter {
         /** Argument slots including the leading entry id. */
         int argSlots;
         /** True when {@link #params} travel through static fields rather than
-         *  arguments; the descriptor is then just the entry id. See CLINIT_SPILL. */
+         *  arguments; the descriptor is then just the entry id. See CLINIT_SPILL.
+         *  With {@link #receiver}, through instance fields of the receiver
+         *  instead, and the descriptor is the receiver and the entry id. */
         boolean spilled;
+        /** True when the part takes the object under construction as its
+         *  first argument (slot 0) and the entry id as its second. Set on every
+         *  part of a plan whose spill fields are instance fields (THE
+         *  &lt;init&gt; SPILL). */
+        boolean receiver;
 
         Part(int index, int startOffset, String name) {
             this.index = index;
@@ -557,9 +625,17 @@ final class MethodSplitter {
         /** The cloned handler whose block contains {@code dexOffset}, or null. */
         Integer clonedHandlerContaining(int dexOffset) { return cloneBlockOf.get(dexOffset); }
 
-        /** The static fields a spilled part's values travel through, as
-         *  {name, descriptor}, for the translator to declare on the class. */
+        /** The fields a spilled part's values travel through, as
+         *  {name, descriptor}, for the translator to declare on the class:
+         *  static fields, or instance fields when {@link #instanceSpill}. */
         List<String[]> spillFields() { return spillFields; }
+
+        /** True when the spill fields are instance fields of the object under
+         *  construction and every part takes it as its first argument (THE
+         *  &lt;init&gt; SPILL). */
+        boolean instanceSpill() {
+            return parts.size() > 1 && parts.get(1).receiver;
+        }
 
         /** Which part a DEX offset belongs to. Parts partition the offset space
          *  into ascending half-open ranges, so this is a plain bucket search and
@@ -613,6 +689,11 @@ final class MethodSplitter {
      *                    an interface's.
      * @param takenFields field names already on the class, so a spill field
      *                    cannot collide
+     * @param receiverDescriptor with {@code spillAllowed}: the descriptor of
+     *                    the object under construction, whose INSTANCE fields
+     *                    the spill uses and which every part then takes as its
+     *                    first argument (THE &lt;init&gt; SPILL); null for the
+     *                    static-field spill of a &lt;clinit&gt;
      */
     static Plan compute(List<TypeInference.Insn> norm,
                         TypeInference.Result types,
@@ -628,11 +709,12 @@ final class MethodSplitter {
                         Set<String> taken,
                         String methodTag,
                         boolean spillAllowed,
-                        Set<String> takenFields) {
+                        Set<String> takenFields,
+                        String receiverDescriptor) {
         NO_CUT.set(Boolean.FALSE);
         Plan p = computeOnce(norm, types, locals, tries, deferredNew, thisUninit, bytecodeOf,
                 totalBytes, targetBytes, allowWiden, returnDescriptor, taken, methodTag,
-                spillAllowed, takenFields, false);
+                spillAllowed, takenFields, receiverDescriptor, false);
         if (p != null || !CLONE_HANDLERS || !Boolean.TRUE.equals(NO_CUT.get())) return p;
         if (DEBUG) {
             System.err.println("[dex-split] " + methodTag
@@ -641,7 +723,7 @@ final class MethodSplitter {
         NO_CUT.set(Boolean.FALSE);
         return computeOnce(norm, types, locals, tries, deferredNew, thisUninit, bytecodeOf,
                 totalBytes, targetBytes, allowWiden, returnDescriptor, taken, methodTag,
-                spillAllowed, takenFields, true);
+                spillAllowed, takenFields, receiverDescriptor, true);
     }
 
     private static Plan computeOnce(List<TypeInference.Insn> norm,
@@ -659,8 +741,12 @@ final class MethodSplitter {
                         String methodTag,
                         boolean spillAllowed,
                         Set<String> takenFields,
+                        String receiverDescriptor,
                         boolean cloning) {
         CURRENT_METHOD.set(methodTag);
+        // THE <init> SPILL: only together with the spill itself, so every
+        // plan this file produced before is produced unchanged.
+        final String receiver = spillAllowed && CTOR_SPILL ? receiverDescriptor : null;
         RETRY_WORTHWHILE.set(Boolean.FALSE);
         LAST_SLOT_DEMAND.set(0);
         final int n = norm.size();
@@ -1009,6 +1095,7 @@ final class MethodSplitter {
         Set<String> usedFields = new HashSet<>(takenFields);
         for (int k = 1; k < parts.size(); k++) {
             Part part = parts.get(k);
+            part.receiver = receiver != null;
             Map<String, Param> union = new LinkedHashMap<>();
             int id = 0;
             for (int t : entryOffsets.get(k)) {
@@ -1028,23 +1115,34 @@ final class MethodSplitter {
             ps.sort(Comparator.<Param>comparingInt(p -> p.slot)
                               .thenComparingInt(p -> p.scalar)
                               .thenComparing(p -> p.descriptor));
-            int slot = 1;   // slot 0 is the entry id
-            StringBuilder desc = new StringBuilder("(I");
+            // Slot 0 is the entry id -- or, with a receiver, the object under
+            // construction, and the entry id is slot 1.
+            String head = part.receiver ? "(" + receiver + "I" : "(I";
+            int slot = part.receiver ? 2 : 1;
+            StringBuilder desc = new StringBuilder(head);
             for (Param p : ps) {
                 p.scratchSlot = slot;      // provisional; rebased in the emitter
                 slot += p.width();
                 desc.append(p.descriptor);
             }
-            if (slot > MAX_PARAM_SLOTS && spillAllowed && CLINIT_SPILL) {
+            boolean spillable = spillAllowed && (part.receiver || CLINIT_SPILL);
+            if (slot > MAX_PARAM_SLOTS && spillable) {
                 // The live set is wider than any descriptor can be: hand it over
-                // through fields instead. See THE ARGUMENT-SLOT WALL above.
+                // through fields instead. See THE ARGUMENT-SLOT WALL above, and
+                // THE <init> SPILL for the instance-field flavour. An instance
+                // field's name carries the method tag: a class's constructors
+                // all spill into the same object, and two overloads must not
+                // pick one name.
+                String base = part.receiver
+                        ? Options.syntheticPrefix + "$spill$" + methodTag + "$"
+                        : Options.syntheticPrefix + "$spill$";
                 for (Param p : ps) {
                     p.scratchSlot = -1;
                     String name = spillNameByKey.get(p.key());
                     if (name == null) {
-                        name = Options.syntheticPrefix + "$spill$" + spillNameByKey.size();
+                        name = base + spillNameByKey.size();
                         for (int d = 1; usedFields.contains(name); d++) {
-                            name = Options.syntheticPrefix + "$spill$" + spillNameByKey.size() + "_" + d;
+                            name = base + spillNameByKey.size() + "_" + d;
                         }
                         usedFields.add(name);
                         spillNameByKey.put(p.key(), name);
@@ -1054,12 +1152,12 @@ final class MethodSplitter {
                 }
                 part.spilled = true;
                 part.params.addAll(ps);
-                part.argSlots = 1;
-                part.descriptor = "(I)" + returnDescriptor;
+                part.argSlots = part.receiver ? 2 : 1;
+                part.descriptor = head + ")" + returnDescriptor;
                 if (DEBUG) {
                     System.err.println("[dex-split] " + methodTag + ": part " + k
                         + " needs " + slot + " argument slots; spilled " + ps.size()
-                        + " values to static fields");
+                        + " values to " + (part.receiver ? "instance" : "static") + " fields");
                 }
                 continue;
             }
