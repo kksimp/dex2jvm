@@ -2484,10 +2484,14 @@ public final class Translator {
                     out.fieldOp(CodeWriter.PUTFIELD, iowner, f.name(), f.type());
                     // The <init> twin of the F_STATIC_PUT case: HotSpot's
                     // version-53 rule also refuses a putfield of a final
-                    // instance field from any method but <init>, and an
-                    // outlined or split constructor writes from a helper.
-                    if (out != mainWriter && iowner.equals(ownerName)
-                            && "<init>".equals(method.name())) {
+                    // instance field from any method but <init>. Two writers
+                    // trip it: an outlined or split constructor (a helper), and
+                    // an ordinary method of the class. ART's verifier only
+                    // requires the writer to live in the declaring class, not
+                    // in its constructor, and bytecode rewriters that update a
+                    // final field from run() produce exactly this.
+                    if (iowner.equals(ownerName)
+                            && (out != mainWriter || !"<init>".equals(method.name()))) {
                         initializerHelperPuts.add(new String[]{ f.name(), f.type() });
                     }
                     break;
@@ -2507,10 +2511,12 @@ public final class Translator {
                     String fowner = DexFile.internalName(f.declaringClass());
                     out.fieldOp(CodeWriter.PUTSTATIC, fowner, f.name(), f.type());
                     // A write from a synthetic helper of <clinit> (an outlined
-                    // chunk or a chain part) rather than from <clinit> itself.
+                    // chunk or a chain part) rather than from <clinit> itself,
+                    // or from an ordinary method of the class (see the putfield
+                    // case above).
                     // See ClassFileWriter.unfinalFieldsWrittenByInitializerHelpers.
-                    if (out != mainWriter && fowner.equals(ownerName)
-                            && "<clinit>".equals(method.name())) {
+                    if (fowner.equals(ownerName)
+                            && (out != mainWriter || !"<clinit>".equals(method.name()))) {
                         initializerHelperPuts.add(new String[]{ f.name(), f.type() });
                     }
                     break;
