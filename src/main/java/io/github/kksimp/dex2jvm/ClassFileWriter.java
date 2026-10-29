@@ -435,7 +435,7 @@ public final class ClassFileWriter {
      *
      * A static final may then be written only by a putstatic in &lt;clinit&gt;, an
      * instance final only by a putfield in &lt;init&gt; (JVMS SE21 6.5; HotSpot
-     * checks it at resolution, so -Xverify:none does not skip it; see
+     * checks it at resolution, so turning bytecode verification off does not skip it; see
      * {@link #unfinalFieldsWrittenByInitializerHelpers} for the source). ART has
      * no such rule. Its verifier refuses a put to a final field only from
      * ANOTHER class, so DEX code may write its own static final from any of its
