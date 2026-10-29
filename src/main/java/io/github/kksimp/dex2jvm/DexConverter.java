@@ -394,10 +394,73 @@ public final class DexConverter {
             try {
                 return convertOne(cls, hierarchy, plan, superIfaces, nestIndex, true);
             } catch (CodeWriter.CodeLengthExceeded e2) {
-                return convertOne(cls, hierarchy, plan, superIfaces, nestIndex, true, true);
+                return stubPass(cls, hierarchy, plan, superIfaces, nestIndex);
             }
         } finally {
             ConstReadingElision.arm(was);
+        }
+    }
+
+    /**
+     * The oversize-stub pass, with {@link ClinitPrecompute} armed: a
+     * &lt;clinit&gt; still over the limit whose every step is a whitelisted data
+     * operation gets the final state it computes emitted instead of the stub,
+     * so the class can initialise. Any other oversize method is stubbed exactly
+     * as before.
+     *
+     * <p>The precomputed initializer takes constant pool entries the stub does
+     * not (its data strings, its helpers). Should the class then run out of
+     * pool, it is converted once more with the rescue disarmed, which is the
+     * stub path as it was, so this pass can only improve the outcome.
+     */
+    static byte[] stubPass(DexClass cls, DexType.ClassHierarchy hierarchy,
+                           InitRepointPlan plan, SuperInterfacePlan superIfaces,
+                           NestIndex nestIndex) {
+        boolean was = ClinitPrecompute.arm(true);
+        ClinitPrecompute.resetFired();
+        try {
+            byte[] out;
+            try {
+                out = convertOne(cls, hierarchy, plan, superIfaces, nestIndex, true, true);
+            } catch (RuntimeException e) {
+                if (!ClinitPrecompute.fired() || !poolFull(e)) throw e;
+                ClinitPrecompute.arm(false);
+                ClinitPrecompute.resetFired();
+                return convertOne(cls, hierarchy, plan, superIfaces, nestIndex, true, true);
+            }
+            if (ClinitPrecompute.fired()) {
+                ClinitPrecompute.precomputed.incrementAndGet();
+                System.err.println("[" + Options.logTag + "] precomputed oversize <clinit> of "
+                    + cls.name() + " (" + ClinitPrecompute.lastSummary() + ")");
+            }
+            return out;
+        } finally {
+            ClinitPrecompute.arm(was);
+            ClinitPrecompute.resetFired();
+        }
+    }
+
+    /**
+     * Whether {@code m} on its own translates past code_length 65535, measured
+     * in a throwaway class file so the attempt leaves nothing behind in the
+     * real class's constant pool: a 100 KB data initializer's literals would
+     * otherwise stay there, unused, once ClinitPrecompute replaces the body.
+     */
+    static boolean overflowsAlone(DexClass cls, DexMethod m, DexType.ClassHierarchy hierarchy,
+                                  InitRepointPlan plan, SuperInterfacePlan superIfaces,
+                                  boolean allowOutlining) {
+        ClassFileWriter scratch = new ClassFileWriter(classAccessFlags(cls), cls.name(),
+            cls.superclassName(), cls.interfaceNames().toArray(new String[0]));
+        ClassFileWriter.MethodWriter smw =
+            scratch.addMethod(m.accessFlags() & METHOD_FLAGS_MASK, m.name(), m.descriptor());
+        try {
+            Translator.translate(m, smw, hierarchy, plan, superIfaces, allowOutlining);
+            CodeWriter body = smw.code();
+            return body != null && body.measuredLength() > 65535;
+        } catch (CodeWriter.CodeLengthExceeded e) {
+            return true;
+        } catch (RuntimeException e) {
+            return false;   // not a size problem; the real translation reports it
         }
     }
 
@@ -453,6 +516,21 @@ public final class DexConverter {
             applyMethodAnnotations(cw, mw, m, defaults.get(m.name()));
             if (m.isAbstract() || m.isNative()) continue;
             if (stubOversize) {
+                // An oversize <clinit> is usually a data table, and when it
+                // computes nothing but this class's own static state,
+                // ClinitPrecompute emits that state instead of the stub (which
+                // would make the CLASS fail to initialise). Measured in a
+                // scratch class first, so a body it replaces leaves no
+                // constants behind.
+                boolean precompute = ClinitPrecompute.armed() && ClinitPrecompute.candidate(m);
+                String refusal = null;
+                if (precompute && overflowsAlone(cls, m, hierarchy, plan, superIfaces, allowOutlining)) {
+                    refusal = ClinitPrecompute.tryEmit(cls, m, cw, mw);
+                    if (refusal == null) {
+                        m.releaseCode();
+                        continue;
+                    }
+                }
                 int over = -1;
                 try {
                     Translator.translate(m, mw, hierarchy, plan, superIfaces,
@@ -473,10 +551,23 @@ public final class DexConverter {
                     over = e.length;        // belt and braces
                 }
                 if (over >= 0) {
+                    mw.resetCode();
+                    if (precompute && refusal == null) {
+                        // The scratch measurement fit and this one did not
+                        // (a fuller pool needs wider ldc forms): still worth it.
+                        refusal = ClinitPrecompute.tryEmit(cls, m, cw, mw);
+                        if (refusal == null) {
+                            m.releaseCode();
+                            continue;
+                        }
+                    }
+                    if (refusal != null) {
+                        System.err.println("[" + Options.logTag + "] oversize <clinit> of "
+                            + cls.name() + " not precomputed: " + refusal);
+                    }
                     // Only THIS method is inexpressible; the rest of the class
                     // is fine. Emit a body that throws with the reason in the
                     // message, so a caller that actually reaches it says so.
-                    mw.resetCode();
                     Translator.emitUnsupportedBody(mw, m,
                         Options.syntheticPrefix + ": " + cls.name() + "." + m.name() + m.descriptor()
                         + " needs code_length " + over + ", over the JVM's 65535"
@@ -489,6 +580,14 @@ public final class DexConverter {
                         + " this one method throws if called");
                 }
             } else {
+                // Test knob DEX2JVM_CLINIT_PRECOMPUTE_FORCE=1: every <clinit>
+                // the rescue accepts, so a gate can exercise it on classes
+                // nowhere near the limit. Never set in normal use.
+                if (ClinitPrecompute.FORCE && ClinitPrecompute.candidate(m)
+                        && ClinitPrecompute.tryEmit(cls, m, cw, mw) == null) {
+                    m.releaseCode();
+                    continue;
+                }
                 Translator.translate(m, mw, hierarchy, plan, superIfaces, allowOutlining);
             }
             // The bytecode is written; nothing reads this body again, and the

@@ -29,6 +29,7 @@ reasoning and the citations (JVMS, AOSP/ART, enjarify).
    TypeInference      -> RegisterState/DexType what each register holds, everywhere
    Translator         -> CodeWriter            register machine -> stack machine
         |   MethodOutliner / MethodSplitter    methods over the 64 KB JVM limit
+        |   ClinitPrecompute                   ... and the data initializers they cannot cut
         |   MonitorCover                       JIT-compilable synchronized code
         v
  StackMapWriter, ConstantPool, AnnotationWriter, ClassFileWriter
@@ -77,6 +78,20 @@ constructing, which every part then takes as its first argument
 splitter both refuse (loudly) rather than emit code they cannot prove correct;
 a method neither can rescue becomes a stub that throws, and the rest of its
 class is kept.
+
+A stubbed `<clinit>` would still cost the whole class (its initialization
+fails), and the usual oversize one is a generated data table that neither
+transform can cut, because it sits in try ranges or `synchronized` blocks. So
+before the stub, `ClinitPrecompute` interprets such an initializer at
+conversion time under a whitelist of operations with no effect outside the
+class's own static fields and its own new arrays (constants, arithmetic,
+branches, arrays, `System.arraycopy`, the class's own static methods, monitors
+on its own Class object), and emits a `<clinit>` that writes the final state:
+array contents packed into String constants and unpacked by small generated
+helpers, with array identity kept. Anything outside the whitelist, or an
+instruction that would throw, leaves the stub in place.
+`DEX2JVM_CLINIT_PRECOMPUTE=0` turns it off; `DEX2JVM_CLINIT_PRECOMPUTE_FORCE=1`
+applies it to every initializer it accepts, for the semantic suite.
 
 **R8-shaped input** (`InitRepointPlan`, `SuperInterfacePlan`, `NestPlan`).
 Shipping apps are minified by R8, which produces bytecode a JVM rejects:
