@@ -74,12 +74,17 @@ public final class DexConverter {
      * skipping unused translation is the whole win of the lazy path.
      */
     public static final class Session {
-        /** Classes converted per parallel batch. Bounds peak memory to a batch's
-         *  worth of class files while still keeping every core busy. */
+        /** Classes in flight at once on the parallel path. Bounds peak memory to
+         *  that many class files while still keeping every core busy. */
         private static final int BATCH = 512;
-        /** Conversion is CPU bound and allocation heavy; past a point more
-         *  threads just add GC pressure on an 8 GB box. */
-        private static final int MAX_THREADS = 8;
+        /** Worker cap that holds whatever the heap: conversion is CPU bound and
+         *  allocation heavy, and 8 workers is what an 8 GB box was tuned for. */
+        private static final int MIN_THREAD_CAP = 8;
+        /** Heap each worker is budgeted past {@link #MIN_THREAD_CAP}. A
+         *  worker's live set is one class's translation plus its share of the
+         *  in-flight window; 256 MB leaves room for the session's resident parse
+         *  (Play services' dex set is large) on top of that. */
+        private static final long HEAP_PER_THREAD = 256L << 20;
 
         private final List<DexFile> files = new ArrayList<>();
         private final Map<String, DexClass> byName = new LinkedHashMap<>();
@@ -177,7 +182,7 @@ public final class DexConverter {
                     // DEX2JVM_INIT_REPOINT=0 turns the whole fix off for A/B.
                     String env = System.getenv("DEX2JVM_INIT_REPOINT");
                     repointPlan = "0".equals(env) ? InitRepointPlan.NONE
-                                                  : InitRepointPlan.build(byName);
+                                                  : InitRepointPlan.build(byName, threadCount());
                 }
                 return repointPlan;
             }
@@ -232,46 +237,43 @@ public final class DexConverter {
                 }
                 return;
             }
-            java.util.concurrent.ExecutorService pool =
-                java.util.concurrent.Executors.newFixedThreadPool(threads, r -> {
-                    Thread t = new Thread(r, Options.logTag);
-                    t.setDaemon(true);   // never hold the JVM open on an early exit
-                    return t;
-                });
+            java.util.concurrent.ExecutorService pool = newPool(threads);
             try {
-                // Batched rather than one big submit: the whole point of forEach
-                // is that memory stays flat regardless of app size (materialising
-                // every class at once needed >3 GB on a 17k-class APK), so only a
-                // batch's worth of class files is ever in flight.
-                for (int start = 0; start < all.size(); start += BATCH) {
-                    int end = Math.min(start + BATCH, all.size());
-                    List<java.util.concurrent.Future<byte[]>> pending =
-                        new ArrayList<>(end - start);
-                    for (int i = start; i < end; i++) {
-                        DexClass c = all.get(i).getValue();
-                        pending.add(pool.submit(() -> convertOne(c, hierarchy, plan, superIfacePlan, nestIndex)));
+                // A sliding window rather than one big submit: the whole point
+                // of forEach is that memory stays flat regardless of app size
+                // (materialising every class at once needed >3 GB on a 17k-class
+                // APK), so at most BATCH class files are ever in flight. It used
+                // to be fixed batches of BATCH, drained to empty before the next
+                // was submitted, which left the pool idle at every batch tail
+                // waiting on the slowest class; the window refills as each class
+                // is drained, so the workers never run dry while classes remain.
+                java.util.ArrayDeque<java.util.concurrent.Future<byte[]>> window =
+                    new java.util.ArrayDeque<>(BATCH);
+                int next = 0;
+                for (int i = 0; i < all.size(); i++) {
+                    while (next < all.size() && window.size() < BATCH) {
+                        DexClass c = all.get(next++).getValue();
+                        window.add(pool.submit(() -> convertOne(c, hierarchy, plan, superIfacePlan, nestIndex)));
                     }
                     // Drained IN ORDER, on this thread. That is what keeps the
                     // output deterministic (dex order, byte-identical to the
                     // sequential path) and what lets `errors` stay a plain
                     // ordered map touched by one thread only.
-                    for (int i = start; i < end; i++) {
-                        String name = all.get(i).getKey();
-                        try {
-                            sink.accept(name, pending.get(i - start).get());
-                        } catch (java.util.concurrent.ExecutionException ex) {
-                            errors.put(name, describe(ex.getCause()));
-                        } catch (InterruptedException ex) {
-                            Thread.currentThread().interrupt();
-                            throw new IllegalStateException("conversion interrupted", ex);
-                        }
-                        // After the get(), so the worker that parsed this class
-                        // has certainly finished with it. A later class in the
-                        // batch may still ask this one a metadata question (via
-                        // SuperInterfacePlan), which simply re-parses; the memo
-                        // is a cache and dropping it cannot change any output.
-                        all.get(i).getValue().releaseMembers();
+                    String name = all.get(i).getKey();
+                    try {
+                        sink.accept(name, window.poll().get());
+                    } catch (java.util.concurrent.ExecutionException ex) {
+                        errors.put(name, describe(ex.getCause()));
+                    } catch (InterruptedException ex) {
+                        Thread.currentThread().interrupt();
+                        throw new IllegalStateException("conversion interrupted", ex);
                     }
+                    // After the get(), so the worker that parsed this class
+                    // has certainly finished with it. A later class in the
+                    // window may still ask this one a metadata question (via
+                    // SuperInterfacePlan), which simply re-parses; the memo
+                    // is a cache and dropping it cannot change any output.
+                    all.get(i).getValue().releaseMembers();
                 }
             } finally {
                 pool.shutdownNow();
@@ -279,11 +281,29 @@ public final class DexConverter {
         }
 
         /** Worker count. Options.threads (DEX2JVM_THREADS) overrides it, mostly
-         *  so the parallel and sequential paths can be A/B'd for byte identity. */
-        private static int threadCount() {
+         *  so the parallel and sequential paths can be A/B'd for byte identity.
+         *
+         *  <p>Otherwise one per core, capped at the larger of MIN_THREAD_CAP and
+         *  one worker per HEAP_PER_THREAD of -Xmx. A flat cap of 8
+         *  changed nothing on an 8-core M2 but left half of a 16-core machine
+         *  idle; the heap term keeps a small -Xmx from being spread over more
+         *  workers than it can feed. Output is byte-identical at any count. */
+        static int threadCount() {
             int n = Options.threads;
             if (n >= 1) return n;
-            return Math.min(Runtime.getRuntime().availableProcessors(), MAX_THREADS);
+            long heapCap = Runtime.getRuntime().maxMemory() / HEAP_PER_THREAD;
+            long cap = Math.max(MIN_THREAD_CAP, heapCap);
+            return (int) Math.max(1, Math.min(Runtime.getRuntime().availableProcessors(), cap));
+        }
+
+        /** The converter's worker pool: daemon threads, so an early exit never
+         *  waits on one. Callers shut it down when they are done with it. */
+        static java.util.concurrent.ExecutorService newPool(int threads) {
+            return java.util.concurrent.Executors.newFixedThreadPool(threads, r -> {
+                Thread t = new Thread(r, Options.logTag);
+                t.setDaemon(true);   // never hold the JVM open on an early exit
+                return t;
+            });
         }
 
         private void convertInto(java.util.function.BiConsumer<String, byte[]> sink,
