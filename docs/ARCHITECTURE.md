@@ -125,7 +125,8 @@ reflection) work and stack traces carry file and line numbers.
 
 ## Determinism
 
-A bulk conversion runs on up to `min(cores, 8)` threads. Results are drained in
+A bulk conversion runs on one thread per core (capped by heap; see
+`DexConverter.Session.threadCount`). Results are drained in
 input order on the calling thread, and nothing in the output depends on
 scheduling, so the jar is byte-identical at any thread count (`--threads 1`
 and the default produce the same bytes).

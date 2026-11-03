@@ -64,7 +64,8 @@ public final class Options {
             "DEX2JVM_REDIRECT_EXIT", "REDIRECT_EXIT", null);
 
     /**
-     * Worker threads for a bulk conversion; 0 means min(cores, 8). Output is
+     * Worker threads for a bulk conversion; 0 means one per core, capped by heap
+     * (see DexConverter.Session.threadCount). Output is
      * byte-identical at every thread count.
      */
     public static volatile int threads = parseInt(setting("dex2jvm.threads",
@@ -99,6 +100,25 @@ public final class Options {
      * class loader. The CLI fills it in according to {@link #library}.
      */
     public static volatile ClassLoader hierarchyLoader = null;
+
+    /** Every field's current value, for {@link #restore}. */
+    static Object[] snapshot() {
+        return new Object[] { syntheticPrefix, unsafeRedirect, exitRedirect, threads,
+                              logTag, parsedMarker, library, hierarchyLoader };
+    }
+
+    /** Puts back what {@link #snapshot} saw: lets one process run several
+     *  command lines in turn without one's flags leaking into the next. */
+    static void restore(Object[] s) {
+        syntheticPrefix = (String) s[0];
+        unsafeRedirect = (String) s[1];
+        exitRedirect = (String) s[2];
+        threads = (Integer) s[3];
+        logTag = (String) s[4];
+        parsedMarker = (Boolean) s[5];
+        library = (String) s[6];
+        hierarchyLoader = (ClassLoader) s[7];
+    }
 
     private static String setting(String property, String env, String hostField, String dflt) {
         String v = System.getProperty(property);
