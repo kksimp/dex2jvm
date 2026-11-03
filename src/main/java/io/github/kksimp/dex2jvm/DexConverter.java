@@ -182,7 +182,7 @@ public final class DexConverter {
                     // DEX2JVM_INIT_REPOINT=0 turns the whole fix off for A/B.
                     String env = System.getenv("DEX2JVM_INIT_REPOINT");
                     repointPlan = "0".equals(env) ? InitRepointPlan.NONE
-                                                  : InitRepointPlan.build(byName, threadCount());
+                                                  : InitRepointPlan.build(byName);
                 }
                 return repointPlan;
             }
@@ -288,7 +288,7 @@ public final class DexConverter {
          *  changed nothing on an 8-core M2 but left half of a 16-core machine
          *  idle; the heap term keeps a small -Xmx from being spread over more
          *  workers than it can feed. Output is byte-identical at any count. */
-        static int threadCount() {
+        private static int threadCount() {
             int n = Options.threads;
             if (n >= 1) return n;
             long heapCap = Runtime.getRuntime().maxMemory() / HEAP_PER_THREAD;
@@ -298,7 +298,7 @@ public final class DexConverter {
 
         /** The converter's worker pool: daemon threads, so an early exit never
          *  waits on one. Callers shut it down when they are done with it. */
-        static java.util.concurrent.ExecutorService newPool(int threads) {
+        private static java.util.concurrent.ExecutorService newPool(int threads) {
             return java.util.concurrent.Executors.newFixedThreadPool(threads, r -> {
                 Thread t = new Thread(r, Options.logTag);
                 t.setDaemon(true);   // never hold the JVM open on an early exit

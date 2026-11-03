@@ -208,27 +208,39 @@ final class InitRepointPlan {
      * Translator.MethodTranslator.invalidRepoints).
      */
     static InitRepointPlan build(Map<String, DexClass> byName) {
-        return build(byName, 1);
-    }
-
-    /**
-     * {@link #build(Map)}, with the per-method scan fanned out over
-     * {@code threads} workers.
-     *
-     * The scan decodes every method in the app before the first class can be
-     * converted, so on one thread it was the last serial stretch of a bulk
-     * conversion (0.4 s cold on 15k classes; 22 s on TikTok's 411k classes in
-     * a busy cold JVM). Each class is scanned on its own, so the work splits
-     * by class with nothing shared; the per-chunk results are merged into the
-     * same sorted containers the serial scan fills, and a TreeMap of
-     * TreeSets holds the same contents whatever order it is filled in. The
-     * chain walk after it stays single threaded: it is cheap, and its memo
-     * makes it order sensitive by design.
-     */
-    static InitRepointPlan build(Map<String, DexClass> byName, int threads) {
         // Candidate (startClass, namedOwner, descriptor) triples. Sorted so a
         // debug dump is stable; correctness does not depend on the order.
-        final Map<String, Candidate> candidates = scan(byName, threads);
+        final Map<String, Candidate> candidates = new TreeMap<>();
+        for (DexClass c : byName.values()) {
+            // Released at the bottom of this iteration. transientCode below is
+            // careful not to memoize a code_item for the same reason, but that
+            // was only half the story: c.methods() itself memoizes the whole
+            // class_data parse onto a DexClass the Session holds for its entire
+            // life, so a scan of every class in the app pinned every class in
+            // the app. See DexClass.releaseMembers.
+            for (DexMethod m : c.methods()) {
+                DexCode code = transientCode(m);
+                if (code == null) continue;
+                Instruction[] decoded;
+                try {
+                    decoded = InstructionDecoder.decode(code.insns());
+                } catch (RuntimeException e) {
+                    // A method we cannot even decode is one Translator will fail
+                    // on too; it must not take the whole plan down with it.
+                    continue;
+                }
+                scanMethod(decoded, m, code, (offset, uninitThis, allocated, ref) -> {
+                    String start = uninitThis ? c.superclassName() : allocated;
+                    if (start == null) return;
+                    String owner = DexFile.internalName(ref.declaringClass());
+                    String desc = ref.proto().descriptor();
+                    candidates.computeIfAbsent(start + ' ' + owner + ' ' + desc,
+                                    k -> new Candidate(start, owner, desc))
+                              .referrers.add(c.name());
+                });
+            }
+            c.releaseMembers();
+        }
 
         // class -> own descriptor -> super descriptor. A TreeMap because the
         // emitted method order must not depend on discovery order.
@@ -264,79 +276,6 @@ final class InitRepointPlan {
         }
         return new InitRepointPlan(Collections.unmodifiableMap(frozen),
                                    Collections.unmodifiableMap(authorised));
-    }
-
-    /** Classes per scan task: big enough to amortise a submit, small enough
-     *  that one chunk of huge classes does not leave the other workers idle. */
-    private static final int SCAN_CHUNK = 256;
-
-    /** Every candidate in {@code byName}, keyed "start owner desc". */
-    private static Map<String, Candidate> scan(Map<String, DexClass> byName, int threads) {
-        List<DexClass> all = new ArrayList<>(byName.values());
-        if (threads <= 1 || all.size() < 2 * SCAN_CHUNK) return scanClasses(all);
-        java.util.concurrent.ExecutorService pool = DexConverter.Session.newPool(threads);
-        try {
-            List<java.util.concurrent.Future<Map<String, Candidate>>> parts = new ArrayList<>();
-            for (int s = 0; s < all.size(); s += SCAN_CHUNK) {
-                List<DexClass> chunk = all.subList(s, Math.min(s + SCAN_CHUNK, all.size()));
-                parts.add(pool.submit(() -> scanClasses(chunk)));
-            }
-            Map<String, Candidate> merged = new TreeMap<>();
-            for (java.util.concurrent.Future<Map<String, Candidate>> part : parts) {
-                for (Map.Entry<String, Candidate> e : part.get().entrySet()) {
-                    Candidate had = merged.putIfAbsent(e.getKey(), e.getValue());
-                    if (had != null) had.referrers.addAll(e.getValue().referrers);
-                }
-            }
-            return merged;
-        } catch (java.util.concurrent.ExecutionException e) {
-            // Whatever escaped the serial scan escapes this one, unwrapped.
-            Throwable cause = e.getCause();
-            if (cause instanceof RuntimeException) throw (RuntimeException) cause;
-            if (cause instanceof Error) throw (Error) cause;
-            throw new IllegalStateException(cause);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("repoint scan interrupted", e);
-        } finally {
-            pool.shutdownNow();
-        }
-    }
-
-    /** The scan proper, over {@code classes} on the calling thread. */
-    private static Map<String, Candidate> scanClasses(List<DexClass> classes) {
-        Map<String, Candidate> candidates = new TreeMap<>();
-        for (DexClass c : classes) {
-            // Released at the bottom of this iteration. transientCode below is
-            // careful not to memoize a code_item for the same reason, but that
-            // was only half the story: c.methods() itself memoizes the whole
-            // class_data parse onto a DexClass the Session holds for its entire
-            // life, so a scan of every class in the app pinned every class in
-            // the app. See DexClass.releaseMembers.
-            for (DexMethod m : c.methods()) {
-                DexCode code = transientCode(m);
-                if (code == null) continue;
-                Instruction[] decoded;
-                try {
-                    decoded = InstructionDecoder.decode(code.insns());
-                } catch (RuntimeException e) {
-                    // A method we cannot even decode is one Translator will fail
-                    // on too; it must not take the whole plan down with it.
-                    continue;
-                }
-                scanMethod(decoded, m, code, (offset, uninitThis, allocated, ref) -> {
-                    String start = uninitThis ? c.superclassName() : allocated;
-                    if (start == null) return;
-                    String owner = DexFile.internalName(ref.declaringClass());
-                    String desc = ref.proto().descriptor();
-                    candidates.computeIfAbsent(start + ' ' + owner + ' ' + desc,
-                                    k -> new Candidate(start, owner, desc))
-                              .referrers.add(c.name());
-                });
-            }
-            c.releaseMembers();
-        }
-        return candidates;
     }
 
     /**
