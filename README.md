@@ -81,6 +81,7 @@ overrides the choice.
 | `--classpath <path>` | jars/dirs the class-hierarchy oracle reads library types from (header only, nothing is loaded); overrides the automatic choice above |
 | `--no-library` | use no library hierarchy at all (less precise; for comparison) |
 | `--threads <n>` | worker threads (default: one per core, at most the larger of 8 and one per 256 MB of heap) |
+| `--server <dir>` | convert in a shared converter process kept warm in `<dir>`: started on demand, exits when idle. Several conversions in a row then pay JVM warm-up once. Output, exit code and files are the same as converting in-process |
 | `--synthetic-prefix <s>` | prefix for synthetic members (default `dex2jvm`) |
 | `--redirect-unsafe <cls>` | route `sun.misc.Unsafe` calls to static methods on `<cls>` (for hosts whose Unsafe semantics differ from ART's) |
 | `--redirect-exit <cls>` | route `System.exit` / `Runtime.exit` / `Runtime.halt` to `<cls>` |
